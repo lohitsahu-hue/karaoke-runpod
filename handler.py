@@ -4,6 +4,9 @@ RunPod Serverless Handler: YouTube → Demucs 4-stem separation + mid-side vocal
 Returns 5 OGG stems: lead_vocals, backing_vocals, drums, bass, other
 Lead vocals = center-panned content (mid channel of vocals stem)
 Backing vocals = side-panned harmonies/ad-libs (side channel of vocals stem)
+
+All stems are encoded as mono OGG at quality 3 (~112kbps) to stay under
+RunPod's 20 MB output payload limit.
 """
 
 import runpod
@@ -45,7 +48,6 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
     out_dir = os.path.join(work_dir, "stems")
     os.makedirs(out_dir, exist_ok=True)
 
-    # Full 4-stem mode — no --two-stems flag
     cmd = [
         "python3", "-m", "demucs",
         "-n", model,
@@ -75,6 +77,7 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
 
     print(f"[demucs] Done → {list(stems.keys())}")
     return stems
+
 
 def mid_side_split(vocals_path, work_dir):
     """Split vocals into lead (center/mid) and backing (sides) using ffmpeg."""
@@ -110,9 +113,16 @@ def mid_side_split(vocals_path, work_dir):
 
     return {"lead_vocals": lead_path, "backing_vocals": backing_path}
 
+
 def wav_to_ogg(wav_path, ogg_path):
-    """Convert WAV to OGG Vorbis for smaller transfer size."""
-    cmd = ["ffmpeg", "-y", "-i", wav_path, "-c:a", "libvorbis", "-q:a", "6", ogg_path]
+    """Convert WAV to mono OGG Vorbis at quality 3 (~112kbps) for small transfer."""
+    cmd = [
+        "ffmpeg", "-y", "-i", wav_path,
+        "-ac", "1",              # force mono — halves size
+        "-c:a", "libvorbis",
+        "-q:a", "3",             # quality 3 ≈ 112kbps (was 6 ≈ 192kbps)
+        ogg_path,
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg ogg failed: {result.stderr[-300:]}")
@@ -124,6 +134,7 @@ def encode_stems_ogg(stems, work_dir):
     ogg_dir = os.path.join(work_dir, "ogg")
     os.makedirs(ogg_dir, exist_ok=True)
     encoded = {}
+    total_bytes = 0
 
     for name, wav_path in stems.items():
         ogg_path = os.path.join(ogg_dir, f"{name}.ogg")
@@ -135,9 +146,16 @@ def encode_stems_ogg(stems, work_dir):
             "size_bytes": len(data),
             "format": "ogg",
         }
-        print(f"[encode] {name}: {len(data) / 1024 / 1024:.1f} MB (OGG)")
+        total_bytes += len(data)
+        print(f"[encode] {name}: {len(data) / 1024 / 1024:.1f} MB (OGG mono q3)")
+
+    # Base64 is ~33% larger than raw bytes
+    estimated_payload = total_bytes * 4 / 3
+    print(f"[encode] Total raw: {total_bytes / 1024 / 1024:.1f} MB, "
+          f"estimated base64 payload: {estimated_payload / 1024 / 1024:.1f} MB")
 
     return encoded
+
 
 def handler(job):
     """RunPod serverless handler."""
@@ -167,7 +185,7 @@ def handler(job):
             stems["lead_vocals"] = vocal_splits["lead_vocals"]
             stems["backing_vocals"] = vocal_splits["backing_vocals"]
 
-        # 4. Compress to OGG + base64 encode
+        # 4. Compress to mono OGG + base64 encode
         encoded = encode_stems_ogg(stems, work_dir)
 
         return {
