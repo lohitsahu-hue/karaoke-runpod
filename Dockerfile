@@ -7,7 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg nodejs &
 
 # Install Python deps: runpod, yt-dlp, demucs, audio-separator (Mel-Band RoFormer)
 # audio-separator needs onnxruntime-gpu for CUDA inference
-RUN pip install --no-cache-dir runpod yt-dlp demucs audio-separator onnxruntime-gpu requests && pip cache purge
+# torchcodec needed by newer torchaudio for save_audio
+RUN pip install --no-cache-dir runpod yt-dlp demucs audio-separator onnxruntime-gpu torchcodec requests && pip cache purge
 
 # Pre-download models so first request is fast
 # 1. Demucs htdemucs model
