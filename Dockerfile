@@ -2,8 +2,8 @@ FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 WORKDIR /app
 
-# Install ffmpeg (needed by yt-dlp for audio conversion)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg + unzip (needed for deno installer)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg unzip && rm -rf /var/lib/apt/lists/*
 
 # Install deno (JS runtime needed by yt-dlp for YouTube extraction)
 RUN curl -fsSL https://deno.land/install.sh | sh
