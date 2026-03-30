@@ -47,33 +47,20 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
     return stems
 
 def upload_file(filepath, filename):
-    """Upload via gofile.io (free, no auth, 10 day retention)."""
+    """Upload via 0x0.st (simple, returns URL as plain text)."""
     size_mb = os.path.getsize(filepath) / 1024 / 1024
     print(f"[upload] Uploading {filename} ({size_mb:.1f} MB)...")
-
-    # Get best server
-    srv_resp = requests.get("https://api.gofile.io/servers", timeout=10)
-    srv_resp.raise_for_status()
-    servers = srv_resp.json().get("data", {}).get("servers", [])
-    server = servers[0]["name"] if servers else "store1"
-
-    # Upload
     with open(filepath, "rb") as f:
         resp = requests.post(
-            f"https://{server}.gofile.io/contents/uploadfile",
+            "https://0x0.st",
             files={"file": (filename, f, "audio/wav")},
-            timeout=120
+            timeout=180
         )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("status") != "ok":
-        raise RuntimeError(f"gofile upload failed: {data}")
-
-    dl_url = data["data"]["downloadPage"]
-    file_id = data["data"]["fileId"]
-    direct_url = f"https://{server}.gofile.io/download/direct/{file_id}/{filename}"
-    print(f"[upload] {filename} -> {dl_url}")
-    return direct_url
+    if resp.status_code == 200:
+        url = resp.text.strip()
+        print(f"[upload] {filename} -> {url}")
+        return url
+    raise RuntimeError(f"Upload failed ({resp.status_code}): {resp.text[:200]}")
 
 def handler(job):
     job_input = job["input"]
