@@ -1,12 +1,16 @@
 """
 RunPod Serverless Handler: YouTube -> Demucs stem separation pipeline.
+Returns presigned URLs to stem files via RunPod's built-in upload.
 """
 import runpod
 import subprocess
 import os
-import base64
 import tempfile
 import traceback
+import requests
+import time
+
+PRESIGNED_URL_ENDPOINT = "https://api.runpod.ai/v2/{}/upload/url"
 
 def download_youtube(youtube_id, work_dir):
     out_path = os.path.join(work_dir, "audio.wav")
@@ -45,18 +49,27 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
     print(f"[demucs] Done -> {list(stems.keys())}")
     return stems
 
-def encode_stems(stems):
-    encoded = {}
-    for name, filepath in stems.items():
-        with open(filepath, "rb") as f:
-            data = f.read()
-        encoded[name] = {
-            "base64": base64.b64encode(data).decode("utf-8"),
-            "size_bytes": len(data),
-            "filename": f"{name}.wav",
-        }
-        print(f"[encode] {name}: {len(data) / 1024 / 1024:.1f} MB")
-    return encoded
+def upload_file(filepath, filename):
+    """Upload a file using transfer.sh and return the download URL."""
+    print(f"[upload] Uploading {filename} ({os.path.getsize(filepath)/1024/1024:.1f} MB)...")
+    with open(filepath, "rb") as f:
+        resp = requests.put(
+            f"https://transfer.sh/{filename}",
+            data=f,
+            headers={"Max-Days": "1"}
+        )
+    if resp.status_code == 200:
+        url = resp.text.strip()
+        print(f"[upload] {filename} -> {url}")
+        return url
+    # Fallback: use file.io
+    with open(filepath, "rb") as f:
+        resp = requests.post("https://file.io", files={"file": (filename, f)})
+    if resp.status_code == 200:
+        url = resp.json().get("link", "")
+        print(f"[upload] {filename} -> {url}")
+        return url
+    raise RuntimeError(f"Upload failed for {filename}: {resp.status_code} {resp.text[:200]}")
 
 def handler(job):
     job_input = job["input"]
@@ -71,12 +84,18 @@ def handler(job):
         audio_path = download_youtube(youtube_id, work_dir)
         print(f"[handler] Download complete: {audio_path}")
         stems = separate_stems(audio_path, work_dir, model)
-        encoded = encode_stems(stems)
+        # Upload each stem and collect URLs
+        stem_urls = {}
+        for name, filepath in stems.items():
+            size = os.path.getsize(filepath)
+            filename = f"{job_id}_{name}.wav"
+            url = upload_file(filepath, filename)
+            stem_urls[name] = {"url": url, "size_bytes": size, "filename": f"{name}.wav"}
         return {
             "job_id": job_id,
             "youtube_id": youtube_id,
-            "stems": encoded,
-            "stem_names": list(encoded.keys()),
+            "stems": stem_urls,
+            "stem_names": list(stem_urls.keys()),
         }
     except Exception as e:
         traceback.print_exc()
