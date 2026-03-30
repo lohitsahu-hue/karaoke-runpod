@@ -1,6 +1,6 @@
 """
 RunPod Serverless Handler: YouTube -> Demucs stem separation pipeline.
-Returns presigned URLs to stem files via RunPod's built-in upload.
+Returns download URLs to stem files via temp file hosting.
 """
 import runpod
 import subprocess
@@ -8,9 +8,6 @@ import os
 import tempfile
 import traceback
 import requests
-import time
-
-PRESIGNED_URL_ENDPOINT = "https://api.runpod.ai/v2/{}/upload/url"
 
 def download_youtube(youtube_id, work_dir):
     out_path = os.path.join(work_dir, "audio.wav")
@@ -50,26 +47,33 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
     return stems
 
 def upload_file(filepath, filename):
-    """Upload a file using transfer.sh and return the download URL."""
-    print(f"[upload] Uploading {filename} ({os.path.getsize(filepath)/1024/1024:.1f} MB)...")
+    """Upload via gofile.io (free, no auth, 10 day retention)."""
+    size_mb = os.path.getsize(filepath) / 1024 / 1024
+    print(f"[upload] Uploading {filename} ({size_mb:.1f} MB)...")
+
+    # Get best server
+    srv_resp = requests.get("https://api.gofile.io/servers", timeout=10)
+    srv_resp.raise_for_status()
+    servers = srv_resp.json().get("data", {}).get("servers", [])
+    server = servers[0]["name"] if servers else "store1"
+
+    # Upload
     with open(filepath, "rb") as f:
-        resp = requests.put(
-            f"https://transfer.sh/{filename}",
-            data=f,
-            headers={"Max-Days": "1"}
+        resp = requests.post(
+            f"https://{server}.gofile.io/contents/uploadfile",
+            files={"file": (filename, f, "audio/wav")},
+            timeout=120
         )
-    if resp.status_code == 200:
-        url = resp.text.strip()
-        print(f"[upload] {filename} -> {url}")
-        return url
-    # Fallback: use file.io
-    with open(filepath, "rb") as f:
-        resp = requests.post("https://file.io", files={"file": (filename, f)})
-    if resp.status_code == 200:
-        url = resp.json().get("link", "")
-        print(f"[upload] {filename} -> {url}")
-        return url
-    raise RuntimeError(f"Upload failed for {filename}: {resp.status_code} {resp.text[:200]}")
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("status") != "ok":
+        raise RuntimeError(f"gofile upload failed: {data}")
+
+    dl_url = data["data"]["downloadPage"]
+    file_id = data["data"]["fileId"]
+    direct_url = f"https://{server}.gofile.io/download/direct/{file_id}/{filename}"
+    print(f"[upload] {filename} -> {dl_url}")
+    return direct_url
 
 def handler(job):
     job_input = job["input"]
@@ -84,7 +88,6 @@ def handler(job):
         audio_path = download_youtube(youtube_id, work_dir)
         print(f"[handler] Download complete: {audio_path}")
         stems = separate_stems(audio_path, work_dir, model)
-        # Upload each stem and collect URLs
         stem_urls = {}
         for name, filepath in stems.items():
             size = os.path.getsize(filepath)
