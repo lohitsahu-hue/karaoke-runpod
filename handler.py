@@ -41,16 +41,35 @@ def download_youtube(youtube_id, work_dir):
             return os.path.join(work_dir, f)
     raise RuntimeError("yt-dlp: output file not found")
 
-def extract_vocals_roformer(audio_path, work_dir):
-    """Phase 1: Use audio-separator with Mel-Band RoFormer for vocal extraction."""
+def extract_vocals_roformer(audio_path, work_dir, timeout=300):
+    """Phase 1: Use audio-separator with Mel-Band RoFormer for vocal extraction.
+    Runs in a subprocess with timeout to prevent hangs from ONNX runtime."""
     out_dir = os.path.join(work_dir, "roformer")
     os.makedirs(out_dir, exist_ok=True)
-    print("[Phase 1] Mel-Band RoFormer: extracting vocals...")
-    from audio_separator.separator import Separator
-    separator = Separator(output_dir=out_dir)
-    separator.load_model()
-    output_files = separator.separate(audio_path)
+    print(f"[Phase 1] Mel-Band RoFormer: extracting vocals (timeout={timeout}s)...")
+
+    # Run separation in a subprocess to enforce timeout
+    script = f"""
+import sys, json
+from audio_separator.separator import Separator
+separator = Separator(output_dir="{out_dir}")
+separator.load_model()
+output_files = separator.separate("{audio_path}")
+print(json.dumps(output_files))
+"""
+    result = subprocess.run(
+        ["python3", "-c", script],
+        capture_output=True, text=True, timeout=timeout
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"RoFormer subprocess failed: {result.stderr[-500:]}")
+
+    # Parse output files from the last line of stdout
+    import json as _json
+    stdout_lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+    output_files = _json.loads(stdout_lines[-1])
     print(f"[Phase 1] RoFormer output: {output_files}")
+
     vocals_path = None
     instrumental_path = None
     for f in output_files:
