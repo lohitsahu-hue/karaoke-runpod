@@ -1,18 +1,19 @@
 """
-RunPod Serverless Handler: YouTube -> Demucs stem separation pipeline.
-Returns download URLs to stem files via temp file hosting.
+RunPod Serverless Handler: YouTube -> Demucs stem separation.
+Returns stems as base64-encoded OGG files (small enough for response body).
 """
 import runpod
 import subprocess
 import os
+import base64
 import tempfile
 import traceback
-import requests
 
 def download_youtube(youtube_id, work_dir):
     out_path = os.path.join(work_dir, "audio.wav")
     url = f"https://www.youtube.com/watch?v={youtube_id}"
-    cmd = ["yt-dlp", "--js-runtimes", "nodejs", "-x", "--audio-format", "wav", "--audio-quality", "0", "--no-playlist", "-o", out_path, url]
+    cmd = ["yt-dlp", "--js-runtimes", "nodejs", "-x", "--audio-format", "wav",
+           "--audio-quality", "0", "--no-playlist", "-o", out_path, url]
     print(f"[yt-dlp] Downloading {youtube_id}...")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
@@ -27,7 +28,8 @@ def download_youtube(youtube_id, work_dir):
 def separate_stems(audio_path, work_dir, model="htdemucs"):
     out_dir = os.path.join(work_dir, "stems")
     os.makedirs(out_dir, exist_ok=True)
-    cmd = ["python3", "-m", "demucs", "-n", model, "--out", out_dir, "--two-stems", "vocals", audio_path]
+    cmd = ["python3", "-m", "demucs", "-n", model, "--out", out_dir,
+           "--two-stems", "vocals", audio_path]
     print(f"[demucs] Separating stems...")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
@@ -46,21 +48,13 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
     print(f"[demucs] Done -> {list(stems.keys())}")
     return stems
 
-def upload_file(filepath, filename):
-    """Upload via 0x0.st (simple, returns URL as plain text)."""
-    size_mb = os.path.getsize(filepath) / 1024 / 1024
-    print(f"[upload] Uploading {filename} ({size_mb:.1f} MB)...")
-    with open(filepath, "rb") as f:
-        resp = requests.post(
-            "https://0x0.st",
-            files={"file": (filename, f, "audio/wav")},
-            timeout=180
-        )
-    if resp.status_code == 200:
-        url = resp.text.strip()
-        print(f"[upload] {filename} -> {url}")
-        return url
-    raise RuntimeError(f"Upload failed ({resp.status_code}): {resp.text[:200]}")
+def wav_to_ogg(wav_path, ogg_path):
+    """Convert WAV to OGG Vorbis using ffmpeg (much smaller)."""
+    cmd = ["ffmpeg", "-y", "-i", wav_path, "-c:a", "libvorbis", "-q:a", "6", ogg_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {result.stderr[-200:]}")
+    return ogg_path
 
 def handler(job):
     job_input = job["input"]
@@ -73,19 +67,26 @@ def handler(job):
     work_dir = tempfile.mkdtemp(prefix=f"karaoke_{job_id}_")
     try:
         audio_path = download_youtube(youtube_id, work_dir)
-        print(f"[handler] Download complete: {audio_path}")
         stems = separate_stems(audio_path, work_dir, model)
-        stem_urls = {}
-        for name, filepath in stems.items():
-            size = os.path.getsize(filepath)
-            filename = f"{job_id}_{name}.wav"
-            url = upload_file(filepath, filename)
-            stem_urls[name] = {"url": url, "size_bytes": size, "filename": f"{name}.wav"}
+        encoded = {}
+        for name, wav_path in stems.items():
+            ogg_path = wav_path.replace(".wav", ".ogg")
+            wav_to_ogg(wav_path, ogg_path)
+            ogg_size = os.path.getsize(ogg_path)
+            with open(ogg_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            encoded[name] = {
+                "base64": b64,
+                "size_bytes": ogg_size,
+                "format": "ogg",
+                "filename": f"{name}.ogg",
+            }
+            print(f"[encode] {name}: WAV {os.path.getsize(wav_path)/1024/1024:.1f}MB -> OGG {ogg_size/1024/1024:.1f}MB")
         return {
             "job_id": job_id,
             "youtube_id": youtube_id,
-            "stems": stem_urls,
-            "stem_names": list(stem_urls.keys()),
+            "stems": encoded,
+            "stem_names": list(encoded.keys()),
         }
     except Exception as e:
         traceback.print_exc()
