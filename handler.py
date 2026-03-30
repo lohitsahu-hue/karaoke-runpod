@@ -12,7 +12,7 @@ import traceback
 def download_youtube(youtube_id, work_dir):
     out_path = os.path.join(work_dir, "audio.wav")
     url = f"https://www.youtube.com/watch?v={youtube_id}"
-    cmd = ["yt-dlp", "--js-runtimes", "nodejs", "-x", "--audio-format", "wav",
+    cmd = ["yt-dlp", "--js-runtimes", "node", "-x", "--audio-format", "wav",
            "--audio-quality", "0", "--no-playlist", "-o", out_path, url]
     print(f"[yt-dlp] Downloading {youtube_id}...")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
