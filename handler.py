@@ -196,23 +196,17 @@ def handler(job):
     try:
         audio_path = download_youtube(youtube_id, work_dir)
         print(f"[handler] Download complete: {audio_path}")
-        try:
-            vocals_path, instrumental_path = extract_vocals_roformer(audio_path, work_dir)
-            stems = separate_instrumental_demucs(instrumental_path, work_dir)
-            vocal_splits = mid_side_split(vocals_path, work_dir)
-            stems["lead_vocals"] = vocal_splits["lead_vocals"]
-            stems["backing_vocals"] = vocal_splits["backing_vocals"]
-            print(f"[handler] Ensemble pipeline complete: {list(stems.keys())}")
-        except Exception as e:
-            print(f"[handler] Ensemble failed ({e}), falling back to Demucs-only...")
-            traceback.print_exc()
-            stems = fallback_demucs_pipeline(audio_path, work_dir)
+        # v6b: Demucs + mid-side vocal split (RoFormer disabled - GPU memory issues)
+        # TODO: Re-enable RoFormer when we have proper GPU memory management
+        stems = fallback_demucs_pipeline(audio_path, work_dir)
+        pipeline_used = "demucs_midside"
         encoded = encode_stems_ogg(stems, work_dir)
         return {
             "job_id": job_id,
             "youtube_id": youtube_id,
             "stems": encoded,
             "stem_names": list(encoded.keys()),
+            "pipeline": pipeline_used if 'pipeline_used' in dir() else "demucs_midside",
         }
     except Exception as e:
         traceback.print_exc()
