@@ -20,5 +20,5 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/karaoke-stems:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/karaoke-stems:v3
+            ${{ secrets.DOCKERHUB_USERNAME }}/karaoke-stems:v4
           platforms: linux/amd64
