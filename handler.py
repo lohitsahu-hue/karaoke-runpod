@@ -1,12 +1,13 @@
 """
-RunPod Serverless Handler: YouTube → Demucs 4-stem separation + mid-side vocal split.
+RunPod Serverless Handler: YouTube → Demucs 4-stem + MDX Karaoke lead/backing split.
+
+Pipeline:
+  1. Download audio from YouTube via yt-dlp
+  2. Demucs htdemucs → vocals, drums, bass, other
+  3. MDX Karaoke 2 on vocals → lead_vocals, backing_vocals
+  4. Encode all 5 stems as mono OGG
 
 Returns 5 OGG stems: lead_vocals, backing_vocals, drums, bass, other
-Lead vocals = center-panned content (mid channel of vocals stem)
-Backing vocals = side-panned harmonies/ad-libs (side channel of vocals stem)
-
-All stems are encoded as mono OGG at quality 3 (~112kbps) to stay under
-RunPod's 20 MB output payload limit.
 """
 
 import runpod
@@ -15,6 +16,9 @@ import os
 import base64
 import tempfile
 import traceback
+
+
+MODEL_DIR = "/app/models"
 
 
 def download_youtube(youtube_id, work_dir):
@@ -79,34 +83,58 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
     return stems
 
 
+def mdx_karaoke_split(vocals_path, work_dir):
+    """Split vocals into lead and backing using MDX Karaoke 2 model."""
+    from audio_separator.separator import Separator
+
+    split_dir = os.path.join(work_dir, "vocal_split")
+    os.makedirs(split_dir, exist_ok=True)
+
+    print("[mdx-karaoke] Splitting vocals into lead/backing...")
+    sep = Separator(output_dir=split_dir, model_file_dir=MODEL_DIR)
+    sep.load_model("UVR_MDXNET_KARA_2.onnx")
+    output_files = sep.separate(vocals_path)
+
+    lead_path = None
+    backing_path = None
+    for f in output_files:
+        full = os.path.join(split_dir, f)
+        if "Vocal" in f and "Inst" not in f:
+            lead_path = full
+        elif "Inst" in f:
+            backing_path = full
+
+    if not lead_path or not backing_path:
+        raise RuntimeError(f"MDX Karaoke split failed, got: {output_files}")
+
+    print(f"[mdx-karaoke] Done → lead: {os.path.basename(lead_path)}, "
+          f"backing: {os.path.basename(backing_path)}")
+    return {"lead_vocals": lead_path, "backing_vocals": backing_path}
+
+
 def mid_side_split(vocals_path, work_dir):
-    """Split vocals into lead (center/mid) and backing (sides) using ffmpeg."""
+    """Fallback: split vocals via mid-side if MDX Karaoke fails."""
     split_dir = os.path.join(work_dir, "vocal_split")
     os.makedirs(split_dir, exist_ok=True)
 
     lead_path = os.path.join(split_dir, "lead_vocals.wav")
     backing_path = os.path.join(split_dir, "backing_vocals.wav")
 
-    # Mid channel: (L+R)/2 — center-panned lead vocals
     cmd_mid = [
         "ffmpeg", "-y", "-i", vocals_path,
-        "-af", "pan=mono|c0=0.5*c0+0.5*c1",
-        lead_path,
+        "-af", "pan=mono|c0=0.5*c0+0.5*c1", lead_path,
     ]
-
-    # Side channel: (L-R)/2 — panned harmonies, backing vocals, ad-libs
     cmd_side = [
         "ffmpeg", "-y", "-i", vocals_path,
-        "-af", "pan=mono|c0=0.5*c0-0.5*c1",
-        backing_path,
+        "-af", "pan=mono|c0=0.5*c0-0.5*c1", backing_path,
     ]
 
-    print("[mid-side] Extracting lead vocals (center)...")
+    print("[mid-side] Fallback: extracting lead vocals (center)...")
     r1 = subprocess.run(cmd_mid, capture_output=True, text=True, timeout=120)
     if r1.returncode != 0:
         raise RuntimeError(f"ffmpeg mid failed: {r1.stderr[-300:]}")
 
-    print("[mid-side] Extracting backing vocals (sides)...")
+    print("[mid-side] Fallback: extracting backing vocals (sides)...")
     r2 = subprocess.run(cmd_side, capture_output=True, text=True, timeout=120)
     if r2.returncode != 0:
         raise RuntimeError(f"ffmpeg side failed: {r2.stderr[-300:]}")
@@ -118,9 +146,9 @@ def wav_to_ogg(wav_path, ogg_path):
     """Convert WAV to mono OGG Vorbis at quality 3 (~112kbps) for small transfer."""
     cmd = [
         "ffmpeg", "-y", "-i", wav_path,
-        "-ac", "1",              # force mono — halves size
+        "-ac", "1",
         "-c:a", "libvorbis",
-        "-q:a", "3",             # quality 3 ≈ 112kbps (was 6 ≈ 192kbps)
+        "-q:a", "3",
         ogg_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -149,7 +177,6 @@ def encode_stems_ogg(stems, work_dir):
         total_bytes += len(data)
         print(f"[encode] {name}: {len(data) / 1024 / 1024:.1f} MB (OGG mono q3)")
 
-    # Base64 is ~33% larger than raw bytes
     estimated_payload = total_bytes * 4 / 3
     print(f"[encode] Total raw: {total_bytes / 1024 / 1024:.1f} MB, "
           f"estimated base64 payload: {estimated_payload / 1024 / 1024:.1f} MB")
@@ -178,9 +205,13 @@ def handler(job):
         # 2. Full 4-stem separation
         stems = separate_stems(audio_path, work_dir, model)
 
-        # 3. Mid-side split on vocals → lead_vocals + backing_vocals
+        # 3. Split vocals into lead + backing
         if "vocals" in stems:
-            vocal_splits = mid_side_split(stems["vocals"], work_dir)
+            try:
+                vocal_splits = mdx_karaoke_split(stems["vocals"], work_dir)
+            except Exception as e:
+                print(f"[handler] MDX Karaoke failed ({e}), falling back to mid-side")
+                vocal_splits = mid_side_split(stems["vocals"], work_dir)
             del stems["vocals"]
             stems["lead_vocals"] = vocal_splits["lead_vocals"]
             stems["backing_vocals"] = vocal_splits["backing_vocals"]
