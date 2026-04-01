@@ -209,19 +209,26 @@ def handler(job):
     """RunPod serverless handler."""
     job_input = job["input"]
     youtube_id = job_input.get("youtube_id")
+    audio_base64 = job_input.get("audio_base64")
     job_id = job_input.get("job_id", "unknown")
     model = job_input.get("model", "hdemucs_mmi")
 
-    if not youtube_id:
-        return {"error": "youtube_id is required"}
+    if not youtube_id and not audio_base64:
+        return {"error": "youtube_id or audio_base64 is required"}
 
-    print(f"[handler] Job {job_id}: processing {youtube_id} with model {model}")
+    print(f"[handler] Job {job_id}: model={model}, audio_base64={'yes' if audio_base64 else 'no'}, youtube_id={youtube_id}")
     work_dir = tempfile.mkdtemp(prefix=f"karaoke_{job_id}_")
 
     try:
-        # 1. Download from YouTube
-        audio_path = download_youtube(youtube_id, work_dir)
-        print(f"[handler] Download complete: {audio_path}")
+        # 1. Get audio — either from base64 payload or YouTube download
+        if audio_base64:
+            audio_path = os.path.join(work_dir, "audio.wav")
+            with open(audio_path, "wb") as f:
+                f.write(base64.b64decode(audio_base64))
+            print(f"[handler] Audio received from base64: {os.path.getsize(audio_path) / 1024 / 1024:.1f} MB")
+        else:
+            audio_path = download_youtube(youtube_id, work_dir)
+            print(f"[handler] Download complete: {audio_path}")
 
         # 2. Full 4-stem separation
         stems = separate_stems(audio_path, work_dir, model)
