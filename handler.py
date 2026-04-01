@@ -22,21 +22,42 @@ MODEL_DIR = "/app/models"
 
 
 def download_youtube(youtube_id, work_dir):
-    """Download audio from YouTube using yt-dlp."""
+    """Download audio from YouTube using yt-dlp with anti-bot measures."""
     out_path = os.path.join(work_dir, "audio.wav")
     url = f"https://www.youtube.com/watch?v={youtube_id}"
 
+    # Use multiple player clients to avoid bot detection on datacenter IPs
     cmd = [
-        "yt-dlp", "--js-runtimes", "node",
+        "yt-dlp",
+        "--extractor-args", "youtube:player_client=ios,web",
+        "--no-check-certificates",
+        "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         "-x", "--audio-format", "wav", "--audio-quality", "0",
-        "--no-playlist", "-o", out_path, url,
+        "--no-playlist",
+        "--no-warnings",
+        "-o", out_path,
+        url,
     ]
 
     print(f"[yt-dlp] Downloading {youtube_id}...")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
     if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp failed: {result.stderr[-500:]}")
+        # Retry with different client if first attempt fails
+        print(f"[yt-dlp] First attempt failed, retrying with web_creator client...")
+        cmd_retry = [
+            "yt-dlp",
+            "--extractor-args", "youtube:player_client=web_creator,mweb",
+            "-x", "--audio-format", "wav", "--audio-quality", "0",
+            "--no-playlist",
+            "--no-warnings",
+            "-o", out_path,
+            url,
+        ]
+        result = subprocess.run(cmd_retry, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(f"yt-dlp failed: {result.stderr[-500:]}")
+
     if os.path.exists(out_path):
         return out_path
 
@@ -59,7 +80,7 @@ def separate_stems(audio_path, work_dir, model="htdemucs"):
         audio_path,
     ]
 
-    print("[demucs] Separating 4 stems (vocals, drums, bass, other)...")
+    print(f"[demucs] Separating 4 stems (vocals, drums, bass, other) with {model}...")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
     if result.returncode != 0:
@@ -189,7 +210,7 @@ def handler(job):
     job_input = job["input"]
     youtube_id = job_input.get("youtube_id")
     job_id = job_input.get("job_id", "unknown")
-    model = job_input.get("model", "htdemucs")
+    model = job_input.get("model", "hdemucs_mmi")
 
     if not youtube_id:
         return {"error": "youtube_id is required"}
